@@ -59,6 +59,7 @@ class ReminderStore:
             );
             CREATE INDEX IF NOT EXISTS idx_reminders_due ON reminders(state,next_notify_at,score);
             CREATE INDEX IF NOT EXISTS idx_reminders_chat ON reminders(source_chat,state);
+            CREATE INDEX IF NOT EXISTS idx_reminders_correlation ON reminders(correlation_key,state);
             CREATE TABLE IF NOT EXISTS cursors (
               chat_key TEXT PRIMARY KEY,
               cursor INTEGER NOT NULL DEFAULT 0,
@@ -79,7 +80,37 @@ class ReminderStore:
         existing = self.conn.execute("SELECT id,state FROM reminders WHERE reminder_key=?", (key,)).fetchone()
         if existing:
             return int(existing["id"]), False
+
+        correlation = str(item.get("correlation_key") or "")
+        related = None
+        if correlation:
+            related = self.conn.execute(
+                """SELECT id,state,score FROM reminders
+                   WHERE correlation_key=? AND state IN ('NEW','NOTIFIED','SNOOZED','ACKNOWLEDGED')
+                   ORDER BY id DESC LIMIT 1""",
+                (correlation,),
+            ).fetchone()
         now = now_iso()
+        if related:
+            reminder_id = int(related["id"])
+            self.conn.execute(
+                """UPDATE reminders SET
+                   source_message_id=?, source_local_id=?, source_time=?, source_sender=?,
+                   summary=?, action=?, deadline=?, score=max(score,?), confidence=max(confidence,?),
+                   reasons=?, payload=?, updated_at=?
+                   WHERE id=?""",
+                (
+                    str(item.get("source_message_id") or ""), item.get("source_local_id"),
+                    str(item.get("source_time") or ""), str(item.get("source_sender") or ""),
+                    str(item.get("summary") or ""), str(item.get("action") or ""), str(item.get("deadline") or ""),
+                    int(item.get("score") or 0), float(item.get("confidence") or 0),
+                    json.dumps(item.get("reasons") or [], ensure_ascii=False),
+                    json.dumps(item.get("payload") or {}, ensure_ascii=False), now, reminder_id,
+                ),
+            )
+            self.conn.commit()
+            return reminder_id, False
+
         self.conn.execute(
             """
             INSERT INTO reminders(
@@ -89,7 +120,7 @@ class ReminderStore:
             ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'NEW',?,?,?,?)
             """,
             (
-                key, str(item.get("correlation_key") or ""), str(item.get("source_kind") or "message"),
+                key, correlation, str(item.get("source_kind") or "message"),
                 str(item.get("source_chat") or ""), str(item.get("source_username") or ""), str(item.get("source_message_id") or ""),
                 item.get("source_local_id"), str(item.get("source_time") or ""), str(item.get("source_sender") or ""),
                 str(item.get("category") or "general"), str(item.get("title") or "微信提醒"), str(item.get("summary") or ""),
@@ -105,9 +136,12 @@ class ReminderStore:
     def due(self, *, limit: int = 20) -> list[dict[str, Any]]:
         now = now_iso()
         rows = self.conn.execute(
-            """SELECT * FROM reminders WHERE state IN ('NEW','SNOOZED','NOTIFIED')
-               AND (next_notify_at='' OR next_notify_at<=?) ORDER BY score DESC, created_at ASC LIMIT ?""",
-            (now, max(1, limit)),
+            """SELECT * FROM reminders
+               WHERE state='NEW'
+                  OR (state='SNOOZED' AND next_notify_at!='' AND next_notify_at<=?)
+                  OR (state='NOTIFIED' AND next_notify_at!='' AND next_notify_at<=?)
+               ORDER BY score DESC, created_at ASC LIMIT ?""",
+            (now, now, max(1, limit)),
         ).fetchall()
         return [dict(row) for row in rows]
 
@@ -143,6 +177,10 @@ class ReminderStore:
     def get_cursor(self, chat_key: str) -> int:
         row = self.conn.execute("SELECT cursor FROM cursors WHERE chat_key=?", (chat_key,)).fetchone()
         return int(row["cursor"]) if row else 0
+
+    def cursor_row(self, chat_key: str) -> dict[str, Any] | None:
+        row = self.conn.execute("SELECT * FROM cursors WHERE chat_key=?", (chat_key,)).fetchone()
+        return dict(row) if row else None
 
     def has_cursor(self, chat_key: str) -> bool:
         return bool(self.conn.execute("SELECT 1 FROM cursors WHERE chat_key=?", (chat_key,)).fetchone())
