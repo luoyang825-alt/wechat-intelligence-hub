@@ -22,7 +22,17 @@ def _chat_key(session: dict[str, Any]) -> tuple[str, str]:
 
 
 def _message_time(row: dict[str, Any]) -> str:
-    return str(row.get("time") or row.get("create_time") or "")
+    value = row.get("time") or row.get("create_time") or ""
+    text = str(value)
+    if text.isdigit():
+        try:
+            number = float(text)
+            if number > 10_000_000_000:
+                number /= 1000.0
+            return datetime.fromtimestamp(number).astimezone().isoformat(timespec="seconds")
+        except (ValueError, OSError, OverflowError):
+            return text
+    return text
 
 
 def _message_local_id(row: dict[str, Any]) -> int:
@@ -30,6 +40,28 @@ def _message_local_id(row: dict[str, Any]) -> int:
         return int(row.get("local_id") or 0)
     except (TypeError, ValueError):
         return 0
+
+
+def _epoch(value: Any) -> float:
+    if value in {None, ""}:
+        return 0.0
+    text = str(value).strip()
+    if text.isdigit():
+        number = float(text)
+        if number > 10_000_000_000:
+            number /= 1000.0
+        return number
+    try:
+        return datetime.fromisoformat(text.replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return 0.0
+
+
+def _session_may_have_newer(session: dict[str, Any], last_seen: str) -> bool:
+    session_time = session.get("last_timestamp") or session.get("last_time") or session.get("update_time") or session.get("sort_timestamp")
+    current = _epoch(session_time)
+    previous = _epoch(last_seen)
+    return bool(current and previous and current > previous + 0.5)
 
 
 def _reader_live(status: dict[str, Any]) -> bool:
@@ -79,16 +111,17 @@ class ReminderService:
         haystack = f"{display} {username}".casefold()
         return any(value and value in haystack for value in configured)
 
-    def _bootstrap_cursor(self, username: str, display: str) -> int:
+    def _bootstrap_cursor(self, username: str, display: str) -> tuple[int, int]:
         minutes = max(1, int(self.config.get("bootstrap_lookback_minutes") or 120))
         since = (datetime.now().astimezone() - timedelta(minutes=minutes)).isoformat(timespec="seconds")
         rows = self.reader.timeline(username, since=since, limit=300)
         max_cursor = 0
+        created = 0
         for row in rows:
             max_cursor = max(max_cursor, _message_local_id(row))
-            self._process_message(display, username, row)
+            created += int(self._process_message(display, username, row))
         self.store.set_cursor(username, max_cursor, _message_time(rows[-1]) if rows else "")
-        return len(rows)
+        return len(rows), created
 
     def _process_message(self, display: str, username: str, row: dict[str, Any]) -> bool:
         local_id = _message_local_id(row)
@@ -113,23 +146,40 @@ class ReminderService:
 
     def ingest_messages(self) -> dict[str, int]:
         sessions = self.reader.sessions(int(self.config.get("session_limit") or 150))
-        scanned = new_messages = created = 0
+        scanned = new_messages = created = recovered_sessions = 0
         for session in sessions:
             username, display = _chat_key(session)
             if not username:
                 continue
             scanned += 1
             if not self.store.has_cursor(username):
-                new_messages += self._bootstrap_cursor(username, display)
+                seen, new_created = self._bootstrap_cursor(username, display)
+                new_messages += seen
+                created += new_created
                 continue
-            cursor = self.store.get_cursor(username)
+
+            cursor_state = self.store.cursor_row(username) or {}
+            cursor = int(cursor_state.get("cursor") or 0)
             rows, next_cursor = self.reader.tail(username, cursor=cursor, limit=120)
+            recovered = False
+            last_seen = str(cursor_state.get("last_seen_time") or "")
+            if not rows and last_seen and _session_may_have_newer(session, last_seen):
+                rows = self.reader.timeline(username, since=last_seen, limit=200)
+                if rows:
+                    next_cursor = max((_message_local_id(row) for row in rows), default=cursor)
+                    recovered = True
+                    recovered_sessions += 1
+
+            latest_time = last_seen
             for row in rows:
                 new_messages += 1
                 created += int(self._process_message(display, username, row))
-            if next_cursor > cursor:
-                self.store.set_cursor(username, next_cursor, _message_time(rows[-1]) if rows else "")
-        return {"sessions": scanned, "messages": new_messages, "created": created}
+                row_time = _message_time(row)
+                if _epoch(row_time) >= _epoch(latest_time):
+                    latest_time = row_time
+            if rows or next_cursor != cursor:
+                self.store.set_cursor(username, next_cursor, latest_time)
+        return {"sessions": scanned, "messages": new_messages, "created": created, "recovered_sessions": recovered_sessions}
 
     def ingest_followups(self) -> int:
         radar = Path(str(self.config.get("radar_db") or default_radar_db())).expanduser()
@@ -212,7 +262,7 @@ class ReminderService:
             self.store.set_health("reader_failures", str(failures))
             self.store.set_health("last_reader_error", str(exc)[:240])
             health_created = self._record_reader_failure(failures, exc)
-            ingest = {"sessions": 0, "messages": 0, "created": 0}
+            ingest = {"sessions": 0, "messages": 0, "created": 0, "recovered_sessions": 0}
         followups = self.ingest_followups()
         delivered = self.deliver()
         return {"reader_failures": failures, "health_created": health_created, "ingest": ingest, "followups": followups, "delivery": delivered}
