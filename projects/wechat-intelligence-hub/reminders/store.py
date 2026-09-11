@@ -86,7 +86,7 @@ class ReminderStore:
               reminder_key,correlation_key,source_kind,source_chat,source_username,source_message_id,source_local_id,
               source_time,source_sender,category,title,summary,action,deadline,score,confidence,reasons,state,
               next_notify_at,created_at,updated_at,payload
-            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'NEW',?,?,?,?,?)
+            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'NEW',?,?,?,?)
             """,
             (
                 key, str(item.get("correlation_key") or ""), str(item.get("source_kind") or "message"),
