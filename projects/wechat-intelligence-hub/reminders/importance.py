@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timedelta
 import re
 from typing import Any
 
@@ -28,6 +27,7 @@ CATEGORY_LABELS = {
     "follow_up_due": "跟进到期",
     "general": "重要信息",
 }
+
 
 @dataclass
 class Decision:
@@ -94,17 +94,17 @@ def evaluate_message(message: dict[str, Any], context: list[dict[str, Any]] | No
             score += 14
             reasons.append("deadline_in_promise")
     elif not from_me and REQUEST.search(text):
-        score += 58
+        score += 72
         category = "direct_request"
         hard = True
         reasons.append("direct_request")
     if not from_me and CHASE.search(text):
-        score += 26
+        score += 72
         category = "chase"
         hard = True
         reasons.append("chase")
     if not from_me and MENTION.search(text):
-        score += 48
+        score += 70
         category = "mention"
         hard = True
         reasons.append("mention_me")
@@ -114,17 +114,17 @@ def evaluate_message(message: dict[str, Any], context: list[dict[str, Any]] | No
             category = "deadline"
         reasons.append("deadline")
     if MEETING.search(text):
-        score += 28
+        score += 48
         if category == "general":
             category = "meeting"
         reasons.append("meeting")
     if PAYMENT.search(text):
-        score += 24
+        score += 45
         if category == "general":
             category = "payment"
         reasons.append("payment")
     if RISK.search(text):
-        score += 56
+        score += 88
         category = "risk"
         hard = True
         reasons.append("operational_risk")
