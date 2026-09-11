@@ -36,6 +36,10 @@ def default_log_path() -> Path:
     return default_data_dir() / "reminder-worker.log"
 
 
+def default_radar_db() -> Path:
+    return Path.home() / ".wechat-intelligence-hub" / "radar.db"
+
+
 def default_config() -> dict[str, Any]:
     return {
         "schema_version": SCHEMA_VERSION,
@@ -51,6 +55,7 @@ def default_config() -> dict[str, Any]:
         "reader_config": "",
         "profile_path": "",
         "label_contacts_csv": "",
+        "radar_db": str(default_radar_db()),
         "state_db": str(default_state_db()),
         "log_path": str(default_log_path()),
         "priority_chats": [],
@@ -179,10 +184,18 @@ def initialize_config(
                 root / "contacts" / "微信标签联系人.csv",
             ]
         )
+        radar = _first_existing(
+            [
+                root / "projects" / "wechat-intelligence-hub" / "radar.db",
+                root / "radar.db",
+            ]
+        )
         if profile:
             config["profile_path"] = profile
         if contacts:
             config["label_contacts_csv"] = contacts
+        if radar:
+            config["radar_db"] = radar
 
     env_mobile = os.environ.get("WECHAT_REMINDER_MOBILE_URL", "").strip()
     if env_mobile:
