@@ -28,12 +28,23 @@ if ($LASTEXITCODE -ne 0) { throw "提醒配置初始化失败" }
 $cfg = Get-Content -Raw -Encoding UTF8 $config | ConvertFrom-Json
 $cfg.desktop.enabled = $true
 $cfg.desktop.actions_enabled = (-not $NoActions)
-$cfg | ConvertTo-Json -Depth 20 | Set-Content -Encoding UTF8 $config
-try {
-  & icacls.exe $config /inheritance:r /grant:r "$env:USERNAME`:(F)" "*S-1-5-18:(F)" "*S-1-5-32-544:(F)" | Out-Null
-} catch {
-  Write-Warning "未能自动收紧 reminders.json ACL，请人工确认该文件仅当前用户/系统管理员可读。"
+$json = $cfg | ConvertTo-Json -Depth 20
+[System.IO.File]::WriteAllText($config, $json + [Environment]::NewLine, (New-Object System.Text.UTF8Encoding($false)))
+
+function Protect-PrivateFile([string]$Path) {
+  if (-not (Test-Path $Path)) { return }
+  try {
+    & icacls.exe $Path /inheritance:r /grant:r "$env:USERNAME`:(F)" "*S-1-5-18:(F)" "*S-1-5-32-544:(F)" | Out-Null
+  } catch {
+    Write-Warning "未能自动收紧 ACL：$Path"
+  }
 }
+Protect-PrivateFile $config
+$readerPrivate = @(
+  (Join-Path $HOME ".config\rion-wechat-reader\config.json"),
+  (Join-Path $HOME ".config\rion-wechat-reader\keys.json")
+)
+foreach ($privatePath in $readerPrivate) { Protect-PrivateFile $privatePath }
 
 if (-not $NoActions) {
   $protocolRoot = "HKCU:\Software\Classes\wechatreminder"
@@ -42,7 +53,7 @@ if (-not $NoActions) {
   New-ItemProperty -Path $protocolRoot -Name "URL Protocol" -Value "" -PropertyType String -Force | Out-Null
   $commandKey = Join-Path $protocolRoot "shell\open\command"
   New-Item -Force $commandKey | Out-Null
-  $handler = "`"$pythonExe`" `"$cli`" --config `"$config`" action-uri `"%1`""
+  $handler = "`"$pythonw`" `"$cli`" --config `"$config`" action-uri `"%1`""
   (Get-Item $commandKey).SetValue("", $handler)
 }
 
