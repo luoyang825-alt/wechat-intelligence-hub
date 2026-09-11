@@ -1,14 +1,13 @@
 from __future__ import annotations
 
 import json
-import os
-from pathlib import Path
 import platform
 import subprocess
-import sys
 from typing import Any
+from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 from urllib.error import URLError, HTTPError
+from xml.sax.saxutils import escape as xml_escape
 
 
 class NotifyError(RuntimeError):
@@ -28,38 +27,74 @@ def _ps_escape(value: str) -> str:
     return value.replace("'", "''")
 
 
+def _windows_balloon(exe: str, title: str, body: str) -> None:
+    title_e = _ps_escape(title[:120])
+    body_e = _ps_escape(body[:300])
+    script = (
+        "$ErrorActionPreference='Stop';"
+        "Add-Type -AssemblyName System.Windows.Forms;"
+        "Add-Type -AssemblyName System.Drawing;"
+        "$n=New-Object System.Windows.Forms.NotifyIcon;"
+        "$n.Icon=[System.Drawing.SystemIcons]::Information;"
+        "$n.Visible=$true;"
+        f"$n.BalloonTipTitle='{title_e}';$n.BalloonTipText='{body_e}';"
+        "$n.ShowBalloonTip(5000);Start-Sleep -Seconds 6;$n.Dispose()"
+    )
+    proc = subprocess.run(
+        [exe, "-NoProfile", "-NonInteractive", "-Command", script],
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=False,
+        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+    )
+    if proc.returncode != 0:
+        raise NotifyError((proc.stderr or proc.stdout or "Windows notification failed")[:240])
+
+
 def windows_toast(title: str, body: str, reminder_id: int, *, actions: bool = False, uri_scheme: str = "wechatreminder") -> None:
     exe = _powershell()
     if not exe:
         raise NotifyError("找不到 PowerShell，无法发送 Windows Toast")
-    title_e = _ps_escape(title[:120])
-    body_e = _ps_escape(body[:300])
-    if actions:
-        launch_ack = f"{uri_scheme}://ack?id={reminder_id}"
-        launch_done = f"{uri_scheme}://done?id={reminder_id}"
-        launch_snooze = f"{uri_scheme}://snooze?id={reminder_id}&minutes=30"
+    title_xml = xml_escape(title[:120])
+    body_xml = xml_escape(body[:300])
+    if actions and reminder_id:
+        launch_ack = xml_escape(f"{uri_scheme}://ack?id={reminder_id}", {'"': '&quot;'})
+        launch_done = xml_escape(f"{uri_scheme}://done?id={reminder_id}", {'"': '&quot;'})
+        launch_snooze = xml_escape(f"{uri_scheme}://snooze?id={reminder_id}&minutes=30", {'"': '&quot;'})
         xml = (
             "<toast><visual><binding template=\"ToastGeneric\">"
-            f"<text>{title_e}</text><text>{body_e}</text></binding></visual><actions>"
+            f"<text>{title_xml}</text><text>{body_xml}</text></binding></visual><actions>"
             f"<action content=\"已处理\" arguments=\"{launch_done}\" activationType=\"protocol\"/>"
             f"<action content=\"30分钟后\" arguments=\"{launch_snooze}\" activationType=\"protocol\"/>"
             f"<action content=\"已看到\" arguments=\"{launch_ack}\" activationType=\"protocol\"/>"
             "</actions></toast>"
         )
     else:
-        xml = f"<toast><visual><binding template=\"ToastGeneric\"><text>{title_e}</text><text>{body_e}</text></binding></visual></toast>"
+        xml = f"<toast><visual><binding template=\"ToastGeneric\"><text>{title_xml}</text><text>{body_xml}</text></binding></visual></toast>"
     xml_e = _ps_escape(xml)
     script = (
         "$ErrorActionPreference='Stop';"
+        "[Windows.UI.Notifications.ToastNotificationManager,Windows.UI.Notifications,ContentType=WindowsRuntime] > $null;"
+        "[Windows.Data.Xml.Dom.XmlDocument,Windows.Data.Xml.Dom.XmlDocument,ContentType=WindowsRuntime] > $null;"
         "$xml=New-Object Windows.Data.Xml.Dom.XmlDocument;"
         f"$xml.LoadXml('{xml_e}');"
         "$toast=[Windows.UI.Notifications.ToastNotification]::new($xml);"
         "$notifier=[Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier('WeChat Intelligence Hub');"
         "$notifier.Show($toast)"
     )
-    proc = subprocess.run([exe, "-NoProfile", "-NonInteractive", "-Command", script], capture_output=True, text=True, timeout=12, check=False, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    proc = subprocess.run(
+        [exe, "-NoProfile", "-NonInteractive", "-Command", script],
+        capture_output=True,
+        text=True,
+        timeout=12,
+        check=False,
+        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+    )
     if proc.returncode != 0:
-        raise NotifyError((proc.stderr or proc.stdout or "Windows Toast 失败")[:240])
+        # Some Windows desktop environments reject unpackaged WinRT toasts.
+        # A balloon is less interactive but still preserves the core reminder.
+        _windows_balloon(exe, title, body)
 
 
 def macos_notification(title: str, body: str) -> None:
@@ -105,12 +140,19 @@ def mobile_notify(item: dict[str, Any], config: dict[str, Any]) -> None:
     url = str(config.get("url") or "").strip()
     if not url:
         raise NotifyError("手机通知已启用但未配置 url")
-    payload = {
-        "topic": "wechat-reminders",
+    message = str(item.get("summary") or "")
+    if config.get("include_chat_name", True) and item.get("source_chat"):
+        message = f"{item.get('source_chat')}｜{message}"
+    if item.get("action"):
+        message += f"\n下一步：{item.get('action')}"
+    payload: dict[str, Any] = {
         "title": str(item.get("title") or "微信重要信息"),
-        "message": str(item.get("summary") or "") + (f"\n下一步：{item.get('action')}" if item.get("action") else ""),
+        "message": message,
         "priority": 5 if int(item.get("score") or 0) >= 88 else 4,
     }
+    parsed = urlparse(url)
+    if parsed.path in {"", "/"}:
+        payload["topic"] = str(config.get("topic") or "wechat-reminders")
     token = str(config.get("token") or "").strip()
     headers = {"Content-Type": "application/json; charset=utf-8"}
     if token:
