@@ -1,0 +1,42 @@
+name: Reminder CI
+
+on:
+  pull_request:
+    paths:
+      - 'projects/wechat-intelligence-hub/reminder_cli.py'
+      - 'projects/wechat-intelligence-hub/reminders/**'
+      - 'projects/wechat-intelligence-hub/config/reminders.example.json'
+      - 'projects/wechat-intelligence-hub/scripts/windows/**'
+      - 'projects/wechat-intelligence-hub/tests/**'
+      - 'projects/wechat-intelligence-hub/scripts/build_release.py'
+      - 'projects/rion-wechat-reader/rion_wechat_reader_windows.py'
+      - '.github/workflows/reminder-ci.yml'
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Compile reminder modules
+        run: |
+          python -m py_compile projects/wechat-intelligence-hub/reminder_cli.py
+          python -m py_compile projects/wechat-intelligence-hub/reminders/*.py
+          python -m py_compile projects/rion-wechat-reader/rion_wechat_reader_windows.py
+      - name: Run reminder tests
+        working-directory: projects/wechat-intelligence-hub
+        run: python -m unittest tests.test_reminders -v
+      - name: Run existing Hub regression suite
+        working-directory: projects/wechat-intelligence-hub
+        run: python -m unittest discover -s tests -v
+      - name: Build public release candidate
+        working-directory: projects/wechat-intelligence-hub
+        run: |
+          python scripts/build_release.py --out /tmp/wechat-intelligence-hub-release
+          test -f /tmp/wechat-intelligence-hub-release/reminder_cli.py
+          test -f /tmp/wechat-intelligence-hub-release/reminders/service.py
+          test -f /tmp/wechat-intelligence-hub-release/config/reminders.example.json
+          (cd /tmp/wechat-intelligence-hub-release && python -m unittest tests.test_reminders -v)
