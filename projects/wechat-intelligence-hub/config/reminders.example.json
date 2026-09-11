@@ -1,0 +1,50 @@
+{
+  "schema_version": 1,
+  "poll_interval_seconds": 15,
+  "reader_timeout_seconds": 25,
+  "session_limit": 150,
+  "bootstrap_lookback_minutes": 120,
+  "context_before": 4,
+  "context_after": 1,
+  "critical_repeat_minutes": 30,
+  "critical_max_notifications": 3,
+  "reader_command": [],
+  "reader_config": "",
+  "profile_path": "",
+  "label_contacts_csv": "",
+  "state_db": "~/.wechat-intelligence-hub/reminders.db",
+  "log_path": "~/.wechat-intelligence-hub/reminder-worker.log",
+  "priority_chats": [],
+  "thresholds": {
+    "context_candidate": 35,
+    "store": 60,
+    "notify": 70,
+    "critical": 88
+  },
+  "health": {
+    "failure_threshold": 3,
+    "failure_notice_cooldown_minutes": 60
+  },
+  "local_model": {
+    "enabled": false,
+    "provider": "ollama",
+    "base_url": "http://127.0.0.1:11434",
+    "model": "",
+    "timeout_seconds": 8,
+    "min_rule_score": 35,
+    "max_rule_score": 84
+  },
+  "desktop": {
+    "enabled": true,
+    "actions_enabled": false,
+    "action_uri_scheme": "wechatreminder"
+  },
+  "mobile": {
+    "enabled": false,
+    "provider": "ntfy",
+    "url": "",
+    "token": "",
+    "timeout_seconds": 8,
+    "include_chat_name": true
+  }
+}
