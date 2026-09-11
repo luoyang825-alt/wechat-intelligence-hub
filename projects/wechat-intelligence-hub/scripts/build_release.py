@@ -21,10 +21,12 @@ ROOT_FILES = {
     "report_bundle_html.py",
     "wechat_intelligence_hub.py",
     "wechat_deal_radar.py",
+    "reminder_cli.py",
 }
-PUBLIC_DIRS = {"assets", "docs", "samples", "scripts", "tests"}
+PUBLIC_DIRS = {"assets", "docs", "samples", "scripts", "tests", "reminders"}
 PUBLIC_EXACT = {
     "config/profile.example.json",
+    "config/reminders.example.json",
     "contacts/README.md",
     "contacts/重点客户名单.example.txt",
     "contacts/排除名单.example.txt",
