@@ -1,11 +1,25 @@
 name: Reminder CI
 
 on:
+  push:
+    branches:
+      - feature/important-reminders-p2
+    paths:
+      - 'projects/wechat-intelligence-hub/reminder_cli.py'
+      - 'projects/wechat-intelligence-hub/reminders/**'
+      - 'projects/wechat-intelligence-hub/config/reminders.example.json'
+      - 'projects/wechat-intelligence-hub/docs/IMPORTANT_REMINDERS.md'
+      - 'projects/wechat-intelligence-hub/scripts/windows/**'
+      - 'projects/wechat-intelligence-hub/tests/**'
+      - 'projects/wechat-intelligence-hub/scripts/build_release.py'
+      - 'projects/rion-wechat-reader/rion_wechat_reader_windows.py'
+      - '.github/workflows/reminder-ci.yml'
   pull_request:
     paths:
       - 'projects/wechat-intelligence-hub/reminder_cli.py'
       - 'projects/wechat-intelligence-hub/reminders/**'
       - 'projects/wechat-intelligence-hub/config/reminders.example.json'
+      - 'projects/wechat-intelligence-hub/docs/IMPORTANT_REMINDERS.md'
       - 'projects/wechat-intelligence-hub/scripts/windows/**'
       - 'projects/wechat-intelligence-hub/tests/**'
       - 'projects/wechat-intelligence-hub/scripts/build_release.py'
@@ -16,6 +30,7 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
