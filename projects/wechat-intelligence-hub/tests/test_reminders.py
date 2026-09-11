@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta
-import json
 from pathlib import Path
 import sqlite3
 import tempfile
@@ -12,6 +10,7 @@ from reminders.config import deep_merge, default_config
 from reminders.importance import evaluate_message
 from reminders.local_model import LocalModelError, validate_local_url
 from reminders.opportunity_bridge import due_opportunity_reminders
+from reminders.service import _reader_live
 from reminders.store import ReminderStore
 from reminders.windows import likely_windows_roots
 
@@ -31,6 +30,16 @@ class ReminderImportanceTests(unittest.TestCase):
         self.assertTrue(decision.important)
         self.assertEqual(decision.category, "my_promise")
         self.assertIn("explicit_self_promise", decision.reasons)
+
+    def test_chase_is_actionable_without_extra_keywords(self):
+        decision = evaluate_message({"sender": "同事A", "text": "昨天说的方案怎么样了", "from_me": False})
+        self.assertTrue(decision.important)
+        self.assertEqual(decision.category, "chase")
+
+    def test_mention_is_actionable_without_extra_keywords(self):
+        decision = evaluate_message({"sender": "同事A", "text": "@我 看一下", "from_me": False})
+        self.assertTrue(decision.important)
+        self.assertEqual(decision.category, "mention")
 
     def test_closure_is_not_reminded(self):
         decision = evaluate_message({"sender": "同事A", "text": "收到", "from_me": False})
@@ -96,6 +105,19 @@ class LocalModelTests(unittest.TestCase):
         with self.assertRaises(LocalModelError):
             validate_local_url("https://example.com/v1")
 
+    def test_nonliteral_hostname_rejected_even_if_it_could_resolve_locally(self):
+        with self.assertRaises(LocalModelError):
+            validate_local_url("http://model.internal:11434")
+
+
+class ReaderHealthTests(unittest.TestCase):
+    def test_reader_live_supports_both_status_contracts(self):
+        self.assertTrue(_reader_live({"live_database_read_ok": True}))
+        self.assertTrue(_reader_live({"live_read_ok": True}))
+        self.assertTrue(_reader_live({"readiness": "ready"}))
+        self.assertFalse(_reader_live({"live_read_ok": False}))
+        self.assertFalse(_reader_live({}))
+
 
 class OpportunityBridgeTests(unittest.TestCase):
     def test_due_followup_becomes_reminder(self):
@@ -116,6 +138,7 @@ class ConfigurationTests(unittest.TestCase):
         merged = deep_merge(default_config(), {"thresholds": {"notify": 80}})
         self.assertEqual(merged["thresholds"]["notify"], 80)
         self.assertIn("critical", merged["thresholds"])
+        self.assertIn("radar_db", merged)
 
     def test_windows_roots_honor_explicit_environment(self):
         with patch.dict("os.environ", {"WECHAT_DATA_DIR": "C:/private-wechat-root"}, clear=False):
