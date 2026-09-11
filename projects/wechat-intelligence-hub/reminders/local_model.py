@@ -3,7 +3,6 @@ from __future__ import annotations
 import ipaddress
 import json
 import re
-import socket
 from typing import Any
 from urllib.parse import urlparse
 from urllib.request import Request, urlopen
@@ -23,19 +22,7 @@ def _is_loopback_host(host: str) -> bool:
     try:
         return ipaddress.ip_address(host).is_loopback
     except ValueError:
-        pass
-    try:
-        infos = socket.getaddrinfo(host, None)
-    except OSError:
         return False
-    addresses = []
-    for info in infos:
-        candidate = info[4][0]
-        try:
-            addresses.append(ipaddress.ip_address(candidate))
-        except ValueError:
-            return False
-    return bool(addresses) and all(address.is_loopback for address in addresses)
 
 
 def validate_local_url(value: str) -> str:
@@ -43,7 +30,7 @@ def validate_local_url(value: str) -> str:
     if parsed.scheme not in {"http", "https"}:
         raise LocalModelError("本地模型地址只允许 http/https")
     if not parsed.hostname or not _is_loopback_host(parsed.hostname):
-        raise LocalModelError("本地模型只允许连接 localhost/127.0.0.0/8/::1，禁止把微信原文发送到远程模型")
+        raise LocalModelError("本地模型只允许字面 localhost/127.0.0.0/8/::1，禁止通过域名或远程地址发送微信原文")
     return value.rstrip("/")
 
 
