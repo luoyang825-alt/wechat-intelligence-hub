@@ -1,16 +1,19 @@
 from __future__ import annotations
 
+from datetime import datetime, timedelta
+import json
 from pathlib import Path
 import sqlite3
 import tempfile
 import unittest
 from unittest.mock import patch
 
+from reminders.cli import main as reminder_main
 from reminders.config import deep_merge, default_config
 from reminders.importance import evaluate_message
 from reminders.local_model import LocalModelError, validate_local_url
 from reminders.opportunity_bridge import due_opportunity_reminders
-from reminders.service import _reader_live
+from reminders.service import ReminderService, _reader_live, _session_may_have_newer
 from reminders.store import ReminderStore
 from reminders.windows import likely_windows_roots
 
@@ -52,6 +55,11 @@ class ReminderImportanceTests(unittest.TestCase):
         self.assertGreaterEqual(decision.score, 88)
         self.assertEqual(decision.category, "risk")
 
+    def test_generic_failure_word_is_not_operational_risk(self):
+        decision = evaluate_message({"sender": "同事A", "text": "这个方案整理了很多失败案例", "from_me": False})
+        self.assertFalse(decision.important)
+        self.assertNotEqual(decision.category, "risk")
+
 
 class ReminderStoreTests(unittest.TestCase):
     def setUp(self):
@@ -63,13 +71,13 @@ class ReminderStoreTests(unittest.TestCase):
         self.store.close()
         self.temp.cleanup()
 
-    def sample(self):
+    def sample(self, *, key="k1", correlation="c1", score=88, summary="麻烦确认方案"):
         return {
-            "reminder_key": "k1", "correlation_key": "c1", "source_kind": "message",
-            "source_chat": "项目群", "source_username": "chat-1", "source_message_id": "100",
+            "reminder_key": key, "correlation_key": correlation, "source_kind": "message",
+            "source_chat": "项目群", "source_username": "chat-1", "source_message_id": key,
             "source_local_id": 10, "source_time": "2026-09-11T08:00:00+08:00", "source_sender": "同事A",
-            "category": "direct_request", "title": "待我处理｜同事A", "summary": "麻烦确认方案",
-            "action": "确认方案", "deadline": "今天", "score": 88, "confidence": 0.9,
+            "category": "direct_request", "title": "待我处理｜同事A", "summary": summary,
+            "action": "确认方案", "deadline": "今天", "score": score, "confidence": 0.9,
             "reasons": ["direct_request"], "payload": {}
         }
 
@@ -80,6 +88,17 @@ class ReminderStoreTests(unittest.TestCase):
         self.assertTrue(created1)
         self.assertFalse(created2)
 
+    def test_same_correlation_merges_open_reminder(self):
+        first, created1 = self.store.upsert_candidate(self.sample(key="k1", correlation="same", score=72))
+        second, created2 = self.store.upsert_candidate(self.sample(key="k2", correlation="same", score=95, summary="再次麻烦确认方案"))
+        self.assertTrue(created1)
+        self.assertFalse(created2)
+        self.assertEqual(first, second)
+        rows = self.store.list(limit=5)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["score"], 95)
+        self.assertEqual(rows[0]["summary"], "再次麻烦确认方案")
+
     def test_snooze_and_done(self):
         reminder_id, _ = self.store.upsert_candidate(self.sample())
         row = self.store.transition(reminder_id, "SNOOZED", snooze_minutes=5)
@@ -89,11 +108,17 @@ class ReminderStoreTests(unittest.TestCase):
         self.assertEqual(row["state"], "DONE")
         self.assertEqual(row["next_notify_at"], "")
 
-    def test_cursor_roundtrip(self):
+    def test_notified_without_repeat_is_not_due(self):
+        reminder_id, _ = self.store.upsert_candidate(self.sample())
+        self.store.mark_notified(reminder_id, repeat_minutes=0)
+        self.assertEqual(self.store.due(), [])
+
+    def test_cursor_roundtrip_and_metadata(self):
         self.assertFalse(self.store.has_cursor("chat"))
-        self.store.set_cursor("chat", 9, "2026-09-11")
+        self.store.set_cursor("chat", 9, "2026-09-11T08:00:00+08:00")
         self.assertTrue(self.store.has_cursor("chat"))
         self.assertEqual(self.store.get_cursor("chat"), 9)
+        self.assertEqual(self.store.cursor_row("chat")["last_seen_time"], "2026-09-11T08:00:00+08:00")
 
 
 class LocalModelTests(unittest.TestCase):
@@ -118,6 +143,35 @@ class ReaderHealthTests(unittest.TestCase):
         self.assertFalse(_reader_live({"live_read_ok": False}))
         self.assertFalse(_reader_live({}))
 
+    def test_session_newer_detects_rotation_recovery_need(self):
+        last_seen = (datetime.now().astimezone() - timedelta(minutes=5)).isoformat(timespec="seconds")
+        self.assertTrue(_session_may_have_newer({"last_timestamp": int(datetime.now().timestamp())}, last_seen))
+
+    def test_ingest_recovers_when_local_id_resets(self):
+        class RotatedReader:
+            def sessions(self, limit):
+                return [{"username": "chat-1", "display_name": "项目群", "last_timestamp": int(datetime.now().timestamp())}]
+            def tail(self, chat, cursor, limit=120):
+                self.tail_cursor = cursor
+                return [], cursor
+            def timeline(self, chat, since="", limit=200):
+                return [{"local_id": 2, "server_id": 2002, "time": datetime.now().astimezone().isoformat(timespec="seconds"), "sender": "A", "text": "收到", "from_me": False}]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            service = ReminderService.__new__(ReminderService)
+            service.config = {"session_limit": 10}
+            service.store = ReminderStore(Path(tmp) / "state.db")
+            service.reader = RotatedReader()
+            service.store.set_cursor("chat-1", 999, (datetime.now().astimezone() - timedelta(minutes=5)).isoformat(timespec="seconds"))
+            service._process_message = lambda display, username, row: False
+            try:
+                result = service.ingest_messages()
+                cursor = service.store.get_cursor("chat-1")
+            finally:
+                service.store.close()
+            self.assertEqual(result["recovered_sessions"], 1)
+            self.assertEqual(cursor, 2)
+
 
 class OpportunityBridgeTests(unittest.TestCase):
     def test_due_followup_becomes_reminder(self):
@@ -131,6 +185,30 @@ class OpportunityBridgeTests(unittest.TestCase):
             self.assertEqual(len(rows), 1)
             self.assertEqual(rows[0]["category"], "follow_up_due")
             self.assertGreaterEqual(rows[0]["score"], 90)
+
+
+class ActionUriTests(unittest.TestCase):
+    def test_done_uri_updates_local_state(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "reminders.json"
+            state_path = Path(tmp) / "state.db"
+            cfg = default_config()
+            cfg["state_db"] = str(state_path)
+            cfg["desktop"]["action_uri_scheme"] = "wechatreminder"
+            config_path.write_text(json.dumps(cfg, ensure_ascii=False), encoding="utf-8")
+            store = ReminderStore(state_path)
+            reminder_id, _ = store.upsert_candidate({
+                "reminder_key": "uri-k", "correlation_key": "uri-c", "category": "direct_request",
+                "title": "测试", "summary": "测试", "score": 80, "confidence": 1.0, "reasons": []
+            })
+            store.close()
+            code = reminder_main(["--config", str(config_path), "action-uri", f"wechatreminder://done?id={reminder_id}"])
+            self.assertEqual(code, 0)
+            store = ReminderStore(state_path)
+            try:
+                self.assertEqual(store.list(limit=1)[0]["state"], "DONE")
+            finally:
+                store.close()
 
 
 class ConfigurationTests(unittest.TestCase):
