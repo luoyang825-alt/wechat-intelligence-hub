@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta
+import hashlib
 import json
 from pathlib import Path
 import time
@@ -29,6 +30,14 @@ def _message_local_id(row: dict[str, Any]) -> int:
         return int(row.get("local_id") or 0)
     except (TypeError, ValueError):
         return 0
+
+
+def _reader_live(status: dict[str, Any]) -> bool:
+    for key in ("live_database_read_ok", "live_read_ok"):
+        if key in status:
+            return bool(status.get(key))
+    readiness = str(status.get("readiness") or status.get("summary") or "").casefold()
+    return readiness in {"ready", "ok"}
 
 
 def _build_item(chat: str, username: str, row: dict[str, Any], decision: Any) -> dict[str, Any]:
@@ -123,12 +132,43 @@ class ReminderService:
         return {"sessions": scanned, "messages": new_messages, "created": created}
 
     def ingest_followups(self) -> int:
-        radar = Path("~/.wechat-intelligence-hub/radar.db").expanduser()
+        radar = Path(str(self.config.get("radar_db") or default_radar_db())).expanduser()
         count = 0
         for item in due_opportunity_reminders(radar):
             _, created = self.store.upsert_candidate(item)
             count += int(created)
         return count
+
+    def _record_reader_failure(self, failures: int, error: Exception) -> int:
+        health = self.config.get("health") or {}
+        threshold = max(1, int(health.get("failure_threshold") or 3))
+        if failures < threshold:
+            return 0
+        last_success = self.store.get_health("last_reader_success", "never")
+        episode = hashlib.sha256(f"reader-health|{last_success}".encode("utf-8")).hexdigest()
+        item = {
+            "reminder_key": episode,
+            "correlation_key": "reader-health",
+            "source_kind": "health",
+            "source_chat": "WeChat Reader",
+            "source_username": "",
+            "source_message_id": "",
+            "source_local_id": None,
+            "source_time": now_iso(),
+            "source_sender": "system",
+            "category": "risk",
+            "title": "微信提醒读取异常",
+            "summary": f"Reader 已连续失败 {failures} 次，当前提醒可能存在覆盖缺口。",
+            "action": "运行 reminder_cli.py doctor，恢复 Reader 后再继续常驻任务",
+            "deadline": "",
+            "score": 92,
+            "confidence": 1.0,
+            "reasons": ["reader_repeated_failure"],
+            "next_notify_at": now_iso(),
+            "payload": {"error_type": type(error).__name__},
+        }
+        _, created = self.store.upsert_candidate(item)
+        return int(created)
 
     def deliver(self) -> dict[str, int]:
         thresholds = self.config.get("thresholds") or {}
@@ -148,28 +188,34 @@ class ReminderService:
             if count >= max_repeats:
                 skipped += 1
                 continue
-            notify(row, self.config)
+            errors = notify(row, self.config)
+            if errors and bool((self.config.get("desktop") or {}).get("enabled", True)) and not bool((self.config.get("mobile") or {}).get("enabled", False)):
+                skipped += 1
+                continue
             self.store.mark_notified(int(row["id"]), repeat_minutes=repeat_minutes if int(row.get("score") or 0) >= critical and count + 1 < max_repeats else 0)
             sent += 1
         return {"sent": sent, "skipped": skipped}
 
     def run_once(self) -> dict[str, Any]:
         failures = int(self.store.get_health("reader_failures", "0") or 0)
+        health_created = 0
         try:
             status = self.reader.status()
-            if status.get("live_database_read_ok") is False and status.get("live_read_ok") is False:
+            if not _reader_live(status):
                 raise ReaderClientError("Reader 尚未达到实时数据库可读状态")
             ingest = self.ingest_messages()
+            failures = 0
             self.store.set_health("reader_failures", "0")
             self.store.set_health("last_reader_success", now_iso())
         except ReaderClientError as exc:
             failures += 1
             self.store.set_health("reader_failures", str(failures))
             self.store.set_health("last_reader_error", str(exc)[:240])
+            health_created = self._record_reader_failure(failures, exc)
             ingest = {"sessions": 0, "messages": 0, "created": 0}
         followups = self.ingest_followups()
         delivered = self.deliver()
-        return {"reader_failures": failures, "ingest": ingest, "followups": followups, "delivery": delivered}
+        return {"reader_failures": failures, "health_created": health_created, "ingest": ingest, "followups": followups, "delivery": delivered}
 
     def run_forever(self) -> None:
         interval = max(5, int(self.config.get("poll_interval_seconds") or 15))
